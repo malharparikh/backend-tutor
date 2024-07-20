@@ -11,14 +11,18 @@ CORS(app)
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
+@app.route('/health', methods=['GET'])
+def health_check():
+    return "OK", 200
+
 @app.route('/analyze', methods=['POST'])
 def analyze_text():
     prompt = request.json['prompt']
     essay = request.json['essay']
-   
+
     # Use GPT-3 to analyze the text
     analysis = get_gpt_analysis(prompt, essay)
-   
+
     return jsonify(analysis)
 
 def get_gpt_analysis(prompt, essay):
@@ -55,7 +59,7 @@ Make sure to identify and specify all types of errors accurately, including spel
         "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json"
     }
-   
+
     data = {
         "model": "gpt-3.5-turbo",
         "messages": [
@@ -64,9 +68,9 @@ Make sure to identify and specify all types of errors accurately, including spel
         ],
         "temperature": 0.7
     }
-   
+
     response = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=data)
-   
+
     if response.status_code == 200:
         result = response.json()['choices'][0]['message']['content']
         return {
@@ -81,4 +85,5 @@ Make sure to identify and specify all types of errors accurately, including spel
         }
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=True)
