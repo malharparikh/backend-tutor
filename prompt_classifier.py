@@ -1,5 +1,5 @@
 import re
-from fuzzywuzzy import fuzz
+from rapidfuzz import fuzz
 from categories import categories
 
 # Minimum similarity threshold for fuzzy matching
