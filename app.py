@@ -21,7 +21,7 @@ logging.basicConfig(level=logging.INFO)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # Initialize Firebase Admin SDK
-cred = credentials.Certificate('edvize-140a2-firebase-adminsdk-mo8mj-66bf6f094b.json')  # Replace with your service account path
+cred = credentials.Certificate('edvize-server-firebase-adminsdk-gib5t-7647fa9821.json')  # Replace with your service account path
 firebase_admin.initialize_app(cred)
 db = firestore.client()
 
