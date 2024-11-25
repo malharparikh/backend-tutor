@@ -1,15 +1,13 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
-import requests
-from dotenv import load_dotenv
 import logging
-import re
-import json
-from prompt_classifier import classify_prompt
-from categories import categories
+from dotenv import load_dotenv
 import firebase_admin
 from firebase_admin import credentials, firestore
+from gpt_analysis import get_gpt_analysis
+from prompt_classifier import classify_prompt
+from categories import categories
 
 load_dotenv()
 
@@ -21,12 +19,28 @@ logging.basicConfig(level=logging.INFO)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # Initialize Firebase Admin SDK
-cred = credentials.Certificate('edvize-server-firebase-adminsdk-gib5t-7647fa9821.json')  # Replace with your service account path
+cred = credentials.Certificate('edvize-server-firebase-adminsdk-gib5t-7647fa9821.json')
 firebase_admin.initialize_app(cred)
 db = firestore.client()
 
 # Firestore Collections and References
 users_ref = db.collection('users')
+
+def check_or_initialize_payment(user_id):
+    """Check or initialize the payment document for a user."""
+    payment_ref = users_ref.document(user_id).collection('payment').document('details')
+    payment_doc = payment_ref.get()
+
+    if not payment_doc.exists:
+        # Initialize payment document with default values
+        payment_ref.set({
+            'token_count': 0,
+            'is_subscribed': False,
+            'subscription_end_date': None
+        })
+        return {'token_count': 0, 'is_subscribed': False}
+    else:
+        return payment_doc.to_dict()
 
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -38,27 +52,41 @@ def analyze_text():
         # Validate the incoming JSON payload
         if not request.is_json:
             return jsonify({"error": "Invalid JSON payload"}), 400
-        
+
         data = request.json
+        user_id = data.get('userId')
         prompt = data.get('prompt')
         essay = data.get('essay')
 
-        if not prompt or not essay:
-            return jsonify({"error": "Missing 'prompt' or 'essay' in the request"}), 400
+        if not user_id or not prompt or not essay:
+            return jsonify({"error": "Missing 'user_id', 'prompt', or 'essay' in the request"}), 400
 
         logging.info(f"Received request with prompt: {prompt[:50]}...")
 
+        # Check or initialize payment document
+        payment_details = check_or_initialize_payment(user_id)
+        token_count = payment_details['token_count']
+        is_subscribed = payment_details['is_subscribed']
+
+        # Verify tokens or subscription
+        tokens_required = 1
+        if not is_subscribed and token_count < tokens_required:
+            return jsonify({"error": "Insufficient tokens. Please purchase tokens or subscribe."}), 403
+
+        # Deduct tokens if not subscribed
+        if not is_subscribed:
+            new_token_count = token_count - tokens_required
+            users_ref.document(user_id).collection('payment').document('details').update({
+                'token_count': new_token_count
+            })
+
         # Classify the prompt
         category = classify_prompt(prompt)
-        logging.info(f"Prompt classified as: {category}")
-
-        # Ensure the category exists in the categories dictionary
         if category not in categories:
             return jsonify({"error": f"Category '{category}' not found in the categories"}), 500
 
         # Perform the essay analysis
         analysis = get_gpt_analysis(prompt, essay, category)
-        
         if "error" in analysis:
             return jsonify(analysis), 500
 
@@ -68,107 +96,68 @@ def analyze_text():
         logging.error(f"Error in analyze_text: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-#     try:
-#         data = request.json
-#         user_id = data['user_id']  # Fetch the user_id from frontend
-#         draft_id = data.get('draft_id', None)  # Optional for update cases
-#         prompt = data['prompt']
-#         essay = data['essay']
-#         status = data['status']
-#         university = data['university']  # Extract university from the request
-#         wordCount = data['wordCount']
-        
-#         # Create the document path
-#         drafts_ref = users_ref.document(user_id).collection('drafts')
-        
-#         if draft_id:  # Update draft if draft_id is provided
-#             draft_doc_ref = drafts_ref.document(draft_id)
-#             draft_doc_ref.set({
-#                 'prompt': prompt,
-#                 'essay': essay,
-#                 'status': status,
-#                 'university': university,  # Include university in the update
-#                 'wordCount': wordCount
-#             }, merge=True)
-#         else:  # Create a new draft
-#             draft_doc_ref = drafts_ref.add({
-#                 'prompt': prompt,
-#                 'essay': essay,
-#                 'status': status,
-#                 'university': university,  # Include university when creating a new draft
-#                 'wordCount': wordCount
-#             })
-#             print(draft_doc_ref, "REF")
-#             draft_id = draft_doc_ref.id  # Get the generated ID
-        
-#         return jsonify({"success": True, "message": "Draft saved successfully", "draft_id": draft_id}), 200
-    
-#     except Exception as e:
-#         return jsonify({"success": False, "error": str(e)}), 500
-
-# Route to Save a Draft
 @app.route('/save-draft', methods=['POST'])
 def save_draft():
     try:
         data = request.json
-        user_id = data['user_id']  # Fetch the user_id from frontend
-        draft_id = data.get('draft_id', None)  # Optional for update cases
+        user_id = data['user_id']
+        draft_id = data.get('draft_id', None)
         prompt = data['prompt']
         essay = data['essay']
         status = data['status']
         university = data['university']
-        wordCount = data['wordCount']  # Extract university from the request
-        
-        # Create the document path
+        wordCount = data['wordCount']
+
+        # Check or initialize payment document
+        check_or_initialize_payment(user_id)
+
         drafts_ref = users_ref.document(user_id).collection('drafts')
-        
-        if draft_id:  # Update draft if draft_id is provided
-            draft_doc_ref = drafts_ref.document(draft_id)
-            draft_doc_ref.set({
+        if draft_id:  # Update existing draft
+            draft_ref = drafts_ref.document(draft_id)
+            draft_ref.set({
                 'prompt': prompt,
                 'essay': essay,
                 'status': status,
-                'university': university,  # Include university in the update
-                wordCount: wordCount
+                'university': university,
+                'wordCount': wordCount
             }, merge=True)
-        else:  # Create a new draft
-            # Destructure the returned tuple
-            _, draft_doc_ref = drafts_ref.add({
+        else:  # Create new draft
+            _, draft_ref = drafts_ref.add({
                 'prompt': prompt,
                 'essay': essay,
                 'status': status,
-                'university': university,  # Include university when creating a new draft
+                'university': university,
                 'wordCount': wordCount
             })
-            draft_id = draft_doc_ref.id  # Get the generated ID correctly
-        
+            draft_id = draft_ref.id
+
         return jsonify({"success": True, "message": "Draft saved successfully", "draft_id": draft_id}), 200
-    
     except Exception as e:
+        logging.error(f"Error in save_draft: {str(e)}")
         return jsonify({"success": False, "error": str(e)}), 500
 
-# Route to Get a Draft by user_id and draft_id
 @app.route('/get-draft', methods=['GET'])
 def get_draft():
     try:
         user_id = request.args.get('user_id')
         draft_id = request.args.get('draft_id')
-        
+
         if not user_id or not draft_id:
             return jsonify({"success": False, "message": "user_id and draft_id are required"}), 400
-        
-        # Reference to the user's draft
+
+        # Check or initialize payment document
+        check_or_initialize_payment(user_id)
+
         draft_ref = users_ref.document(user_id).collection('drafts').document(draft_id)
         draft = draft_ref.get()
-        
         if draft.exists:
             return jsonify({"success": True, "draft": draft.to_dict()}), 200
         else:
             return jsonify({"success": False, "message": "Draft not found"}), 404
-    
     except Exception as e:
+        logging.error(f"Error in get_draft: {str(e)}")
         return jsonify({"success": False, "error": str(e)}), 500
-
+    
 # Route to Get All Drafts by user_id
 @app.route('/get-all-drafts', methods=['GET'])
 def get_all_drafts():
@@ -177,6 +166,8 @@ def get_all_drafts():
         
         if not user_id:
             return jsonify({"success": False, "message": "user_id is required"}), 400
+        
+        check_or_initialize_payment(user_id)
         
         # Reference to the user's drafts collection
         drafts_ref = users_ref.document(user_id).collection('drafts')
@@ -189,301 +180,70 @@ def get_all_drafts():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
-# def get_gpt_analysis(prompt, essay, category):
-#     # Fetch additional information based on the category
-#     category_info = categories.get(category, {})
-#     category_overview = category_info.get("overview", "No overview available.")
-#     category_suggestions = category_info.get("suggestions", "No specific suggestions available.")
-#     category_common_errors = category_info.get("common_errors", [])
-
-#     # Define the system and user messages for GPT, including category-specific information
-#     system_message = f"""You are a college admissions counselor with a strict approach to grammar and content. Your task is to rigorously analyze this college admissions essay and provide extremely detailed feedback.
-    
-#     For this specific essay category:
-#     - {category_overview}
-    
-#     Be especially mindful of the following suggestions when providing improvement feedback:
-#     - {category_suggestions}
-    
-#     The essay must be flawless in terms of grammar, spelling, punctuation, and clarity. Identify every error, no matter how small, and be particularly strict about:
-#     - Sentence structure
-#     - Tense consistency
-#     - Subject-verb agreement
-#     - Article usage (a, an, the)
-#     - Punctuation placement
-#     - Transitions and conjunctions
-#     - Repetitive sentence patterns or awkward phrasing
-
-#     When analyzing the essay's content, provide constructive criticism to ensure it answers the prompt effectively and improves the applicant's chances of admission.
-
-#     Format for feedback:
-#     - CONTENT_FEEDBACK: 1 line overview, 1 line explanation, 1 line specific location in the essay
-#     - SPELLING_ERRORS: Quote the error directly from the essay, provide correction, and indicate its exact position.
-#     - GRAMMAR_ERRORS: Quote the error, suggest a correction, and provide its exact position.
-#     - PUNCTUATION_ERRORS: Quote the punctuation error, suggest correction, and provide its exact position.
-#     - IMPROVEMENT_SUGGESTIONS: Provide strict improvement suggestions that align with college admissions requirements. Avoid suggesting 'proofreading' and be specific about how the change would positively impact the essay's readability or relevance."""
-
-#     user_message = f"""Prompt: {prompt}
-
-# Essay:
-# {essay}
-
-# Analyze the essay and provide a response in the following format:
-
-# CONTENT_FEEDBACK:
-# [1 line overview, 1 line explanation, 1 line location in the essay]
-
-# SPELLING_ERRORS:
-# [Quote the error, provide correction, and indicate position]
-
-# GRAMMAR_ERRORS:
-# [Quote the error, provide correction, and indicate position]
-
-# PUNCTUATION_ERRORS:
-# [Quote the error, provide correction, and indicate position]
-
-# IMPROVEMENT_SUGGESTIONS:
-# [Strict improvement suggestions related to clarity and effectiveness of the essay. Conclude with how these changes would affect the overall quality of the essay.]"""
-
-#     headers = {
-#         "Authorization": f"Bearer {OPENAI_API_KEY}",
-#         "Content-Type": "application/json"
-#     }
-#     data = {
-#         "model": "gpt-4o-mini",
-#         "messages": [
-#             {"role": "system", "content": system_message},
-#             {"role": "user", "content": user_message}
-#         ],
-#         "temperature": 0.1,
-#         "max_tokens": 2000
-#     }
-
-#     # try:
-#     #     response = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=data, timeout=30)
-#     #     response.raise_for_status()
-#     #     result = response.json().get('choices', [])[0].get('message', {}).get('content', '')
-        
-#     #     if not result:
-#     #         raise ValueError("Empty result received from the GPT API")
-
-#     #     # Process the GPT result...
-#     #     # (You can use the same logic here to structure the output)
-
-#     #     # Returning a simplified response for now
-#     #     return {
-#     #         "category": category,
-#     #         "feedback": result
-#     #     }
-
-#     # except requests.exceptions.RequestException as e:
-#     #     logging.error(f"Error in get_gpt_analysis: {str(e)}")
-#     #     return {
-#     #         "error": f"Failed to get analysis from GPT: {str(e)}",
-#     #         "status_code": getattr(e.response, 'status_code', None)
-#     #     }
-#     # except Exception as e:
-#     #     logging.error(f"Unexpected error in get_gpt_analysis: {str(e)}")
-#     #     return {
-#     #         "error": f"An unexpected error occurred: {str(e)}",
-#     #         "raw_response": result if 'result' in locals() else "No response received"
-#     #     }
-
-#     try:
-#         response = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=data, timeout=30)
-#         response.raise_for_status()  # Check if request is successful
-#         result = response.json().get('choices', [])[0].get('message', {}).get('content', '')
-#         # Log the result for debugging purposes
-#         logging.debug(f"GPT-4 response: {result}")
-#         if not result:
-#             raise ValueError("Empty result received from the GPT API")
-#         # Initialize variables for each section
-#         sections = {
-#             "CONTENT_FEEDBACK": "",
-#             "SPELLING_ERRORS": "",
-#             "GRAMMAR_ERRORS": "",
-#             "PUNCTUATION_ERRORS": "",
-#             "IMPROVEMENT_SUGGESTIONS": ""
-#         }
-#         # Track the current section
-#         current_section = None
-#         # Process each line in the result
-#         for line in result.splitlines():
-#             line = line.strip()  # Remove leading/trailing spaces
-#             # Check if the line starts with a section header
-#             for section in sections.keys():
-#                 if line.startswith(section + ":"):
-#                     current_section = section
-#                     line = line[len(section) + 1:].strip()  # Remove section header and colon
-#                     break
-#             # If inside a section, append the content
-#             if current_section:
-#                 sections[current_section] += line + "\n"
-#         # Handle common errors for spelling, grammar, and punctuation
-#         if not sections["SPELLING_ERRORS"].strip() and category_common_errors:
-#             sections["SPELLING_ERRORS"] = "Common spelling errors:\n" + "\n".join(category_common_errors.get("spelling", []))
-#         if not sections["GRAMMAR_ERRORS"].strip() and category_common_errors:
-#             sections["GRAMMAR_ERRORS"] = "Common grammar errors:\n" + "\n".join(category_common_errors.get("grammar", []))
-#         if not sections["PUNCTUATION_ERRORS"].strip() and category_common_errors:
-#             sections["PUNCTUATION_ERRORS"] = "Common punctuation errors:\n" + "\n".join(category_common_errors.get("punctuation", []))
-#         # Post-process sections to handle empty content
-#         for section, content in sections.items():
-#             if not content.strip():
-#                 sections[section] = "No errors found" if "ERRORS" in section else "No suggestions found"
-#         # Return the response in a structured format
-#         return {
-#             "category": category,
-#             "content_feedback": sections["CONTENT_FEEDBACK"].strip(),
-#             "spelling_errors": sections["SPELLING_ERRORS"].strip(),
-#             "grammar_errors": sections["GRAMMAR_ERRORS"].strip(),
-#             "punctuation_errors": sections["PUNCTUATION_ERRORS"].strip(),
-#             "improvement_suggestions": sections["IMPROVEMENT_SUGGESTIONS"].strip(),
-#             "word_count": len(essay.split()),
-#             "prompt": prompt
-#         }
-#     except requests.exceptions.RequestException as e:
-#         logging.error(f"Error in get_gpt_analysis: {str(e)}")
-#         return {
-#             "error": f"Failed to get analysis from GPT: {str(e)}",
-#             "status_code": getattr(e.response, 'status_code', None)
-#         }
-#     except Exception as e:
-#         logging.error(f"Unexpected error in get_gpt_analysis: {str(e)}")
-#         return {
-#             "error": f"An unexpected error occurred: {str(e)}",
-#             "raw_response": result if 'result' in locals() else "No response received"
-#         }
-
-def get_gpt_analysis(prompt, essay, category):
-    # Fetch additional information based on the category
-    category_info = categories.get(category, {})
-    category_overview = category_info.get("overview", "No overview available.")
-    category_suggestions = category_info.get("suggestions", "No specific suggestions available.")
-    category_common_errors = category_info.get("common_errors", [])
-
-    # Define the system and user messages for GPT, including category-specific information
-    system_message = f"""You are a college admissions counselor with a strict approach to grammar and content. Your task is to rigorously analyze this college admissions essay and provide extremely detailed feedback.
-    
-    For this specific essay category:
-    - {category_overview}
-    
-    Be especially mindful of the following suggestions when providing improvement feedback:
-    - {category_suggestions}
-    
-    The essay must be flawless in terms of grammar, spelling, punctuation, and clarity. Identify every error, no matter how small, and be particularly strict about:
-    - Sentence structure
-    - Tense consistency
-    - Subject-verb agreement
-    - Article usage (a, an, the)
-    - Punctuation placement
-    - Transitions and conjunctions
-    - Repetitive sentence patterns or awkward phrasing
-
-    When analyzing the essay's content, provide constructive criticism to ensure it answers the prompt effectively and improves the applicant's chances of admission.
-
-    Format for feedback:
-    - CONTENT_FEEDBACK: 1st point: Overall feedback of the essay (be harsh and critique), 2nd point: Feedback related to prompt relevance, 3rd point: Most concerning line from the essay that you get in the input, in quotes.
-    - SPELLING_ERRORS: Quote the error directly from the essay, provide correction, and indicate its exact position.
-    - GRAMMAR_ERRORS: Quote the error, suggest a correction, and provide its exact position.
-    - PUNCTUATION_ERRORS: Quote the punctuation error, suggest correction, and provide its exact position.
-    - IMPROVEMENT_SUGGESTIONS: Provide strict improvement suggestions that align with college admissions requirements. Avoid suggesting 'proofreading' and be specific about how the change would positively impact the essay's readability or relevance."""
-
-    user_message = f"""Prompt: {prompt}
-
-Essay:
-{essay}
-
-Analyze the essay and provide a response in the following format:
-
-CONTENT_FEEDBACK:
-[1st point: Overall feedback (be harsh), 2nd point: Feedback related to prompt relevance, 3rd point: Most concerning line, in quotes.]
-
-SPELLING_ERRORS:
-[Quote the error, provide correction, and indicate position and if no errors then just return 'No errors found']
-
-GRAMMAR_ERRORS:
-[Quote the error, provide correction, and indicate position and if no errors then just return 'No errors found']
-
-PUNCTUATION_ERRORS:
-[Quote the error, provide correction, and indicate position and if no errors then just return 'No errors found']
-
-IMPROVEMENT_SUGGESTIONS:
-[Strict improvement suggestions related to clarity and effectiveness of the essay. Conclude with how these changes would affect the overall quality of the essay.]"""
-
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    data = {
-        "model": "gpt-4o-mini",
-        "messages": [
-            {"role": "system", "content": system_message},
-            {"role": "user", "content": user_message}
-        ],
-        "temperature": 0.1,
-        "max_tokens": 2000
-    }
-
+@app.route('/update-tokens', methods=['POST'])
+def update_tokens():
+    """
+    API to deduct 1 token for a user only if not subscribed.
+    """
     try:
-        response = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=data, timeout=30)
-        response.raise_for_status()  # Check if request is successful
-        result = response.json().get('choices', [])[0].get('message', {}).get('content', '')
-        
-        if not result:
-            raise ValueError("Empty result received from the GPT API")
-        
-        logging.debug(f"GPT-4 response: {result}")
+        data = request.json
+        user_id = data.get('user_id')
 
-        # Initialize variables for each section
-        sections = {
-            "CONTENT_FEEDBACK": "",
-            "SPELLING_ERRORS": "",
-            "GRAMMAR_ERRORS": "",
-            "PUNCTUATION_ERRORS": "",
-            "IMPROVEMENT_SUGGESTIONS": ""
-        }
-        
-        # Track the current section
-        current_section = None
-        
-        # Process each line in the result
-        for line in result.splitlines():
-            line = line.strip()  # Remove leading/trailing spaces
-            
-            # Check if the line starts with a section header
-            for section in sections.keys():
-                if line.startswith(section + ":"):
-                    current_section = section
-                    line = line[len(section) + 1:].strip()  # Remove section header and colon
-                    break
+        if not user_id:
+            return jsonify({"success": False, "message": "user_id is required"}), 400
 
-            # If inside a section, append the content
-            if current_section:
-                sections[current_section] += line + "\n"
-        
-        # Return the response in a structured format
-        return {
-            "category": category,
-            "content_feedback": sections["CONTENT_FEEDBACK"].strip(),
-            "spelling_errors": sections["SPELLING_ERRORS"].strip(),
-            "grammar_errors": sections["GRAMMAR_ERRORS"].strip(),
-            "punctuation_errors": sections["PUNCTUATION_ERRORS"].strip(),
-            "improvement_suggestions": sections["IMPROVEMENT_SUGGESTIONS"].strip(),
-            "word_count": len(essay.split()),
-            "prompt": prompt
-        }
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Error in get_gpt_analysis: {str(e)}")
-        return {
-            "error": f"Failed to get analysis from GPT: {str(e)}",
-            "status_code": getattr(e.response, 'status_code', None)
-        }
+        payment_ref = users_ref.document(user_id).collection('payment').document('details')
+
+        # Fetch the existing payment document
+        payment_doc = payment_ref.get()
+        if not payment_doc.exists:
+            return jsonify({"success": False, "message": "Payment document not found"}), 404
+
+        payment_data = payment_doc.to_dict()
+        token_count = payment_data.get('token_count', 0)
+        is_subscribed = payment_data.get('is_subscribed', False)
+
+        # Check if the user is subscribed
+        if is_subscribed:
+            return jsonify({"success": False, "message": "User is subscribed; no tokens deducted"}), 200
+
+        # Deduct 1 token if user has enough tokens
+        if token_count > 0:
+            payment_ref.update({'token_count': token_count - 1})
+            return jsonify({"success": True, "message": "Token deducted successfully", "new_token_count": token_count - 1}), 200
+        else:
+            return jsonify({"success": False, "message": "Insufficient tokens"}), 400
+
     except Exception as e:
-        logging.error(f"Unexpected error in get_gpt_analysis: {str(e)}")
-        return {
-            "error": f"An unexpected error occurred: {str(e)}",
-            "raw_response": result if 'result' in locals() else "No response received"
-        }
+        logging.error(f"Error in update_tokens: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/get-tokens', methods=['GET'])
+def get_tokens():
+    """
+    API to fetch token count and subscription details for a user.
+    """
+    try:
+        user_id = request.args.get('user_id')
+
+        if not user_id:
+            return jsonify({"success": False, "message": "user_id is required"}), 400
+
+        payment_ref = users_ref.document(user_id).collection('payment').document('details')
+
+        # Fetch the payment document
+        payment_doc = payment_ref.get()
+        if not payment_doc.exists:
+            return jsonify({"success": False, "message": "Payment document not found"}), 404
+
+        # Return the payment details
+        payment_details = payment_doc.to_dict()
+        return jsonify({"success": True, "payment_details": payment_details}), 200
+
+    except Exception as e:
+        logging.error(f"Error in get_tokens: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 if __name__ == '__main__':
