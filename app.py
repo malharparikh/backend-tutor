@@ -218,6 +218,42 @@ def update_tokens():
         logging.error(f"Error in update_tokens: {str(e)}")
         return jsonify({"success": False, "error": str(e)}), 500
 
+@app.route('/add-tokens', methods=['POST'])
+def add_tokens():
+    """
+    API to add tokens for a user.
+    """
+    try:
+        data = request.json
+        user_id = data.get('user_id')
+        tokens_to_add = data.get('token_count')
+
+        if not user_id:
+            return jsonify({"success": False, "message": "user_id is required"}), 400
+
+        if tokens_to_add is None or tokens_to_add <= 0:
+            return jsonify({"success": False, "message": "token_count must be a positive integer"}), 400
+
+        payment_ref = users_ref.document(user_id).collection('payment').document('details')
+
+        # Fetch the existing payment document
+        payment_doc = payment_ref.get()
+        if not payment_doc.exists:
+            return jsonify({"success": False, "message": "Payment document not found"}), 404
+
+        payment_data = payment_doc.to_dict()
+        token_count = payment_data.get('token_count', 0)
+
+        # Add tokens to the existing token count
+        new_token_count = token_count + tokens_to_add
+        payment_ref.update({'token_count': new_token_count})
+
+        return jsonify({"success": True, "message": f"{tokens_to_add} tokens added successfully", "new_token_count": new_token_count}), 200
+
+    except Exception as e:
+        logging.error(f"Error in add_tokens: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
 
 @app.route('/get-tokens', methods=['GET'])
 def get_tokens():
