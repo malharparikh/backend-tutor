@@ -34,11 +34,11 @@ def check_or_initialize_payment(user_id):
     if not payment_doc.exists:
         # Initialize payment document with default values
         payment_ref.set({
-            'token_count': 0,
+            'token_count': 1,
             'is_subscribed': False,
             'subscription_end_date': None
         })
-        return {'token_count': 0, 'is_subscribed': False}
+        return {'token_count': 1, 'is_subscribed': False}
     else:
         return payment_doc.to_dict()
 
