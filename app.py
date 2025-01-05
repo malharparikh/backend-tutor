@@ -8,6 +8,7 @@ from firebase_admin import credentials, firestore
 from gpt_analysis import get_gpt_analysis
 from prompt_classifier import classify_prompt
 from categories import categories
+import stripe
 
 load_dotenv()
 
@@ -17,6 +18,10 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 logging.basicConfig(level=logging.INFO)
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
+STRIPE_API_KEY = os.getenv("STRIPE_API_KEY")
+
+stripe.api_key = STRIPE_API_KEY
 
 # Initialize Firebase Admin SDK
 cred = credentials.Certificate('edvize-server-firebase-adminsdk-gib5t-7647fa9821.json')
@@ -45,6 +50,37 @@ def check_or_initialize_payment(user_id):
 @app.route('/health', methods=['GET'])
 def health_check():
     return "OK", 200
+
+@app.route('/webhook', methods=['POST'])
+def stripe_webhook():
+    """Handle Stripe webhook events."""
+    payload = request.data
+    sig_header = request.headers.get('Stripe-Signature')
+
+    try:
+        # Verify the webhook signature
+        event = stripe.Webhook.construct_event(
+            payload, sig_header, STRIPE_WEBHOOK_SECRET
+        )
+    except ValueError as e:
+        logging.error("Invalid payload")
+        return jsonify({"error": "Invalid payload"}), 400
+    except stripe.error.SignatureVerificationError as e:
+        logging.error("Invalid signature")
+        return jsonify({"error": "Invalid signature"}), 400
+
+    # Handle the event
+    if event['type'] == 'payment_intent.succeeded':
+        payment_intent = event['data']['object']
+        logging.info(f"Payment succeeded for PaymentIntent: {payment_intent['id']}")
+    elif event['type'] == 'payment_intent.payment_failed':
+        payment_intent = event['data']['object']
+        logging.warning(f"Payment failed for PaymentIntent: {payment_intent['id']}")
+    else:
+        logging.info(f"Unhandled event type: {event['type']}")
+
+    return jsonify({"status": "success"}), 200
+
 
 @app.route('/analyze', methods=['POST'])
 def analyze_text():
