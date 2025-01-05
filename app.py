@@ -106,6 +106,7 @@ def stripe_webhook():
         logging.info("PAYMENT INTENT", payment_intent)
         user_id = payment_intent['metadata'].get('user_id')  # User ID from metadata
         amount_received = payment_intent['amount_received']  # Amount in cents
+        logging.info("PAY AMOUNT", amount_received)
 
         if not user_id:
             logging.error("Payment succeeded, but no user_id in metadata")
