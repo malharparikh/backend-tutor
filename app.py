@@ -9,6 +9,7 @@ from gpt_analysis import get_gpt_analysis
 from prompt_classifier import classify_prompt
 from categories import categories
 import stripe
+from datetime import datetime, timedelta
 
 load_dotenv()
 
@@ -51,6 +52,36 @@ def check_or_initialize_payment(user_id):
 def health_check():
     return "OK", 200
 
+# @app.route('/webhook', methods=['POST'])
+# def stripe_webhook():
+#     """Handle Stripe webhook events."""
+#     payload = request.data
+#     sig_header = request.headers.get('Stripe-Signature')
+
+#     try:
+#         # Verify the webhook signature
+#         event = stripe.Webhook.construct_event(
+#             payload, sig_header, STRIPE_WEBHOOK_SECRET
+#         )
+#     except ValueError as e:
+#         logging.error("Invalid payload")
+#         return jsonify({"error": "Invalid payload"}), 400
+#     except stripe.error.SignatureVerificationError as e:
+#         logging.error("Invalid signature")
+#         return jsonify({"error": "Invalid signature"}), 400
+
+#     # Handle the event
+#     if event['type'] == 'payment_intent.succeeded':
+#         payment_intent = event['data']['object']
+#         logging.info(f"Payment succeeded for PaymentIntent: {payment_intent['id']}")
+#     elif event['type'] == 'payment_intent.payment_failed':
+#         payment_intent = event['data']['object']
+#         logging.warning(f"Payment failed for PaymentIntent: {payment_intent['id']}")
+#     else:
+#         logging.info(f"Unhandled event type: {event['type']}")
+
+#     return jsonify({"status": "success"}), 200
+
 @app.route('/webhook', methods=['POST'])
 def stripe_webhook():
     """Handle Stripe webhook events."""
@@ -72,7 +103,91 @@ def stripe_webhook():
     # Handle the event
     if event['type'] == 'payment_intent.succeeded':
         payment_intent = event['data']['object']
-        logging.info(f"Payment succeeded for PaymentIntent: {payment_intent['id']}")
+        user_id = payment_intent['metadata'].get('user_id')  # User ID from metadata
+        amount_received = payment_intent['amount_received']  # Amount in cents
+
+        if not user_id:
+            logging.error("Payment succeeded, but no user_id in metadata")
+            return jsonify({"error": "User ID missing in metadata"}), 400
+
+        try:
+            # Reference to the user's payment document
+            payment_ref = users_ref.document(user_id).collection('payment').document('details')
+            payment_doc = payment_ref.get()
+
+            if not payment_doc.exists:
+                logging.error(f"Payment document not found for user {user_id}")
+                return jsonify({"error": "Payment document not found"}), 404
+
+            payment_data = payment_doc.to_dict()
+
+            # Determine token or subscription based on amount
+            if amount_received == 350:  # Example: $5 for 50 tokens
+                tokens_to_add = 5
+                payment_ref.update({'token_count': payment_data['token_count'] + tokens_to_add})
+                logging.info(f"Added {tokens_to_add} tokens for user {user_id}")
+
+            elif amount_received == 650:  # Example: $10 for 120 tokens
+                tokens_to_add = 10
+                payment_ref.update({'token_count': payment_data['token_count'] + tokens_to_add})
+                logging.info(f"Added {tokens_to_add} tokens for user {user_id}")
+
+            elif amount_received == 1800:  # Example: $10 for 120 tokens
+                tokens_to_add = 30
+                payment_ref.update({'token_count': payment_data['token_count'] + tokens_to_add})
+                logging.info(f"Added {tokens_to_add} tokens for user {user_id}")
+
+            elif amount_received == 2750:  # Example: $10 for 120 tokens
+                tokens_to_add = 50
+                payment_ref.update({'token_count': payment_data['token_count'] + tokens_to_add})
+                logging.info(f"Added {tokens_to_add} tokens for user {user_id}")
+
+            elif amount_received == 5000:  # Example: $10 for 120 tokens
+                tokens_to_add = 100
+                payment_ref.update({'token_count': payment_data['token_count'] + tokens_to_add})
+                logging.info(f"Added {tokens_to_add} tokens for user {user_id}")
+
+            elif amount_received == 2000:  # Example: $20 for a subscription
+
+                # Calculate subscription end date (e.g., 1 month from now)
+                current_date = datetime.utcnow()
+                subscription_duration = timedelta(days=30)
+                new_subscription_end_date = (
+                    max(current_date, payment_data.get('subscription_end_date', current_date))
+                    + subscription_duration
+                )
+
+                payment_ref.update({
+                    'token_count': 99999,
+                    'is_subscribed': True,
+                    'subscription_end_date': new_subscription_end_date
+                })
+                logging.info(f"Updated subscription for user {user_id} to end on {new_subscription_end_date}")
+
+            elif amount_received == 5000:  # Example: $20 for a subscription
+
+                # Calculate subscription end date (e.g., 1 month from now)
+                current_date = datetime.utcnow()
+                subscription_duration = timedelta(days=90)
+                new_subscription_end_date = (
+                    max(current_date, payment_data.get('subscription_end_date', current_date))
+                    + subscription_duration
+                )
+
+                payment_ref.update({
+                    'token_count': 99999,
+                    'is_subscribed': True,
+                    'subscription_end_date': new_subscription_end_date
+                })
+                logging.info(f"Updated subscription for user {user_id} to end on {new_subscription_end_date}")
+
+            else:
+                logging.warning(f"Unhandled payment amount: {amount_received} for user {user_id}")
+
+        except Exception as e:
+            logging.error(f"Error updating payment details for user {user_id}: {str(e)}")
+            return jsonify({"error": str(e)}), 500
+
     elif event['type'] == 'payment_intent.payment_failed':
         payment_intent = event['data']['object']
         logging.warning(f"Payment failed for PaymentIntent: {payment_intent['id']}")
