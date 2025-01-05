@@ -4,7 +4,7 @@ import os
 import logging
 from dotenv import load_dotenv
 import firebase_admin
-from firebase_admin import credentials, firestore
+from firebase_admin import credentials, firestore, auth
 from gpt_analysis import get_gpt_analysis
 from prompt_classifier import classify_prompt
 from categories import categories
