@@ -103,7 +103,8 @@ def stripe_webhook():
     # Handle the event
     if event['type'] == 'payment_intent.succeeded':
         payment_intent = event['data']['object']
-        logging.info("PAYMENT INTENT", payment_intent)
+        user_email = payment_intent.get('charges', {}).get('data', [{}])[0].get('billing_details', {}).get('email')
+        logging.info("EMAIL", user_email)
         user_id = payment_intent['metadata'].get('user_id')  # User ID from metadata
         amount_received = payment_intent['amount_received']  # Amount in cents
         logging.info("PAY AMOUNT", amount_received)
