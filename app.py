@@ -10,7 +10,6 @@ from prompt_classifier import classify_prompt
 from categories import categories
 import stripe
 from datetime import datetime, timedelta
-import json
 
 load_dotenv()
 
@@ -105,16 +104,25 @@ def stripe_webhook():
     if event['type'] == 'payment_intent.succeeded':
         payment_intent = event['data']['object']
         logging.info("Payment Intent: %s", json.dumps(payment_intent, indent=2))
-        user_id = payment_intent['metadata'].get('user_id')  # User ID from metadata
-        amount_received = payment_intent['amount_received']  # Amount in cents
-        logging.info("PAY AMOUNT", amount_received)
 
-        if not user_id:
-            logging.error("Payment succeeded, but no user_id in metadata")
-            return jsonify({"error": "User ID missing in metadata"}), 400
+        # Get user email from the payment intent
+        user_email = payment_intent.get('receipt_email')
+        amount_received = payment_intent.get('amount_received')  # Amount in cents
+
+        if not user_email:
+            logging.error("Payment succeeded, but no receipt email found")
+            return jsonify({"error": "User email missing"}), 400
 
         try:
-            # Reference to the user's payment document
+            # Reference to the user's payment document using email
+            user_query = users_ref.where("email", "==", user_email).get()
+            if not user_query:
+                logging.error(f"No user found with email {user_email}")
+                return jsonify({"error": "User not found"}), 404
+
+            # Assuming one user matches the query
+            user_doc = user_query[0]
+            user_id = user_doc.id
             payment_ref = users_ref.document(user_id).collection('payment').document('details')
             payment_doc = payment_ref.get()
 
@@ -125,70 +133,53 @@ def stripe_webhook():
             payment_data = payment_doc.to_dict()
 
             # Determine token or subscription based on amount
+            tokens_to_add = 0
             if amount_received == 350:  # Example: $5 for 50 tokens
                 tokens_to_add = 5
-                payment_ref.update({'token_count': payment_data['token_count'] + tokens_to_add})
-                logging.info(f"Added {tokens_to_add} tokens for user {user_id}")
-
             elif amount_received == 650:  # Example: $10 for 120 tokens
                 tokens_to_add = 10
-                payment_ref.update({'token_count': payment_data['token_count'] + tokens_to_add})
-                logging.info(f"Added {tokens_to_add} tokens for user {user_id}")
-
-            elif amount_received == 1800:  # Example: $10 for 120 tokens
+            elif amount_received == 1800:  # Example: $18 for 300 tokens
                 tokens_to_add = 30
-                payment_ref.update({'token_count': payment_data['token_count'] + tokens_to_add})
-                logging.info(f"Added {tokens_to_add} tokens for user {user_id}")
-
-            elif amount_received == 2750:  # Example: $10 for 120 tokens
+            elif amount_received == 2750:  # Example: $27.50 for 500 tokens
                 tokens_to_add = 50
-                payment_ref.update({'token_count': payment_data['token_count'] + tokens_to_add})
-                logging.info(f"Added {tokens_to_add} tokens for user {user_id}")
-
-            elif amount_received == 5000:  # Example: $10 for 120 tokens
+            elif amount_received == 5000:  # Example: $50 for 1000 tokens
                 tokens_to_add = 100
-                payment_ref.update({'token_count': payment_data['token_count'] + tokens_to_add})
-                logging.info(f"Added {tokens_to_add} tokens for user {user_id}")
-
-            elif amount_received == 2000:  # Example: $20 for a subscription
-
-                # Calculate subscription end date (e.g., 1 month from now)
+            elif amount_received == 2000:  # Example: $20 for a 1-month subscription
                 current_date = datetime.utcnow()
                 subscription_duration = timedelta(days=30)
                 new_subscription_end_date = (
                     max(current_date, payment_data.get('subscription_end_date', current_date))
                     + subscription_duration
                 )
-
                 payment_ref.update({
                     'token_count': 99999,
                     'is_subscribed': True,
                     'subscription_end_date': new_subscription_end_date
                 })
                 logging.info(f"Updated subscription for user {user_id} to end on {new_subscription_end_date}")
-
-            elif amount_received == 5000:  # Example: $20 for a subscription
-
-                # Calculate subscription end date (e.g., 1 month from now)
+                return jsonify({"status": "success"}), 200
+            elif amount_received == 5000:  # Example: $50 for a 3-month subscription
                 current_date = datetime.utcnow()
                 subscription_duration = timedelta(days=90)
                 new_subscription_end_date = (
                     max(current_date, payment_data.get('subscription_end_date', current_date))
                     + subscription_duration
                 )
-
                 payment_ref.update({
                     'token_count': 99999,
                     'is_subscribed': True,
                     'subscription_end_date': new_subscription_end_date
                 })
                 logging.info(f"Updated subscription for user {user_id} to end on {new_subscription_end_date}")
+                return jsonify({"status": "success"}), 200
 
-            else:
-                logging.warning(f"Unhandled payment amount: {amount_received} for user {user_id}")
+            # Update token count if applicable
+            if tokens_to_add > 0:
+                payment_ref.update({'token_count': payment_data['token_count'] + tokens_to_add})
+                logging.info(f"Added {tokens_to_add} tokens for user {user_id}")
 
         except Exception as e:
-            logging.error(f"Error updating payment details for user {user_id}: {str(e)}")
+            logging.error(f"Error updating payment details for user {user_email}: {str(e)}")
             return jsonify({"error": str(e)}), 500
 
     elif event['type'] == 'payment_intent.payment_failed':
