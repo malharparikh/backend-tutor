@@ -52,114 +52,6 @@ def check_or_initialize_payment(user_id):
 def health_check():
     return "OK", 200
 
-# @app.route('/webhook', methods=['POST'])
-# def stripe_webhook():
-#     """Handle Stripe webhook events."""
-#     payload = request.data
-#     sig_header = request.headers.get('Stripe-Signature')
-
-#     try:
-#         # Verify the webhook signature
-#         event = stripe.Webhook.construct_event(
-#             payload, sig_header, STRIPE_WEBHOOK_SECRET
-#         )
-#     except ValueError as e:
-#         logging.error("Invalid payload")
-#         return jsonify({"error": "Invalid payload"}), 400
-#     except stripe.error.SignatureVerificationError as e:
-#         logging.error("Invalid signature")
-#         return jsonify({"error": "Invalid signature"}), 400
-
-#     # Handle the event
-#     if event['type'] == 'payment_intent.succeeded':
-#         payment_intent = event['data']['object']
-#         logging.info("Payment Intent: %s", json.dumps(payment_intent, indent=2))
-
-#         # Get user email from the payment intent
-#         user_email = payment_intent.get('receipt_email')
-#         amount_received = payment_intent.get('amount_received')  # Amount in cents
-
-#         if not user_email:
-#             logging.error("Payment succeeded, but no receipt email found")
-#             return jsonify({"error": "User email missing"}), 400
-
-#         try:
-#             # Reference to the user's payment document using email
-#             user_query = users_ref.where("email", "==", user_email).get()
-#             if not user_query:
-#                 logging.error(f"No user found with email {user_email}")
-#                 return jsonify({"error": "User not found"}), 404
-
-#             # Assuming one user matches the query
-#             user_doc = user_query[0]
-#             user_id = user_doc.id
-#             payment_ref = users_ref.document(user_id).collection('payment').document('details')
-#             payment_doc = payment_ref.get()
-
-#             if not payment_doc.exists:
-#                 logging.error(f"Payment document not found for user {user_id}")
-#                 return jsonify({"error": "Payment document not found"}), 404
-
-#             payment_data = payment_doc.to_dict()
-
-#             # Determine token or subscription based on amount
-#             tokens_to_add = 0
-#             if amount_received == 350:  # Example: $5 for 50 tokens
-#                 tokens_to_add = 5
-#             elif amount_received == 650:  # Example: $10 for 120 tokens
-#                 tokens_to_add = 10
-#             elif amount_received == 1800:  # Example: $18 for 300 tokens
-#                 tokens_to_add = 30
-#             elif amount_received == 2750:  # Example: $27.50 for 500 tokens
-#                 tokens_to_add = 50
-#             elif amount_received == 5000:  # Example: $50 for 1000 tokens
-#                 tokens_to_add = 100
-#             elif amount_received == 2000:  # Example: $20 for a 1-month subscription
-#                 current_date = datetime.utcnow()
-#                 subscription_duration = timedelta(days=30)
-#                 new_subscription_end_date = (
-#                     max(current_date, payment_data.get('subscription_end_date', current_date))
-#                     + subscription_duration
-#                 )
-#                 payment_ref.update({
-#                     'token_count': 99999,
-#                     'is_subscribed': True,
-#                     'subscription_end_date': new_subscription_end_date
-#                 })
-#                 logging.info(f"Updated subscription for user {user_id} to end on {new_subscription_end_date}")
-#                 return jsonify({"status": "success"}), 200
-#             elif amount_received == 5000:  # Example: $50 for a 3-month subscription
-#                 current_date = datetime.utcnow()
-#                 subscription_duration = timedelta(days=90)
-#                 new_subscription_end_date = (
-#                     max(current_date, payment_data.get('subscription_end_date', current_date))
-#                     + subscription_duration
-#                 )
-#                 payment_ref.update({
-#                     'token_count': 99999,
-#                     'is_subscribed': True,
-#                     'subscription_end_date': new_subscription_end_date
-#                 })
-#                 logging.info(f"Updated subscription for user {user_id} to end on {new_subscription_end_date}")
-#                 return jsonify({"status": "success"}), 200
-
-#             # Update token count if applicable
-#             if tokens_to_add > 0:
-#                 payment_ref.update({'token_count': payment_data['token_count'] + tokens_to_add})
-#                 logging.info(f"Added {tokens_to_add} tokens for user {user_id}")
-
-#         except Exception as e:
-#             logging.error(f"Error updating payment details for user {user_email}: {str(e)}")
-#             return jsonify({"error": str(e)}), 500
-
-#     elif event['type'] == 'payment_intent.payment_failed':
-#         payment_intent = event['data']['object']
-#         logging.warning(f"Payment failed for PaymentIntent: {payment_intent['id']}")
-#     else:
-#         logging.info(f"Unhandled event type: {event['type']}")
-
-#     return jsonify({"status": "success"}), 200
-
 @app.route('/webhook', methods=['POST'])
 def stripe_webhook():
     """Handle Stripe webhook events."""
@@ -267,7 +159,43 @@ def stripe_webhook():
 
     return jsonify({"status": "success"}), 200
 
+@app.route('/validate-subscription/<user_id>', methods=['POST'])
+def validate_subscription_for_user(user_id):
+    """Check subscription status for a specific user and update as necessary."""
+    try:
+        # Fetch the user by user_id
+        user_ref = users_ref.document(user_id)
+        user_data = user_ref.get()
 
+        if not user_data.exists:
+            return jsonify({"error": "User not found"}), 404
+
+        user_data = user_data.to_dict()
+
+        # Check if the user is subscribed
+        if not user_data.get('is_subscribed', False):
+            return jsonify({"status": "no_subscription", "message": "User is not subscribed."}), 200
+
+        # Check if subscription has expired
+        subscription_end_date = user_data.get('subscription_end_date')
+        if subscription_end_date and datetime.utcnow() > subscription_end_date:
+            # Update subscription status, token count, and set subscription_end_date to None
+            user_ref.update({
+                'is_subscribed': False,
+                'token_count': 0,
+                'subscription_end_date': None
+            })
+            logging.info(f"Updated user {user_id}: subscription expired.")
+            return jsonify({"status": "expired", "message": "Subscription expired and updated."}), 200
+
+        return jsonify({"status": "active", "message": "Subscription is still active."}), 200
+
+    except Exception as e:
+        logging.error(f"Error validating subscription for user {user_id}: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
+   
 @app.route('/analyze', methods=['POST'])
 def analyze_text():
     try:
