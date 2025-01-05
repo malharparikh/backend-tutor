@@ -73,7 +73,85 @@ def health_check():
 #     # Handle the event
 #     if event['type'] == 'payment_intent.succeeded':
 #         payment_intent = event['data']['object']
-#         logging.info(f"Payment succeeded for PaymentIntent: {payment_intent['id']}")
+#         logging.info("Payment Intent: %s", json.dumps(payment_intent, indent=2))
+
+#         # Get user email from the payment intent
+#         user_email = payment_intent.get('receipt_email')
+#         amount_received = payment_intent.get('amount_received')  # Amount in cents
+
+#         if not user_email:
+#             logging.error("Payment succeeded, but no receipt email found")
+#             return jsonify({"error": "User email missing"}), 400
+
+#         try:
+#             # Reference to the user's payment document using email
+#             user_query = users_ref.where("email", "==", user_email).get()
+#             if not user_query:
+#                 logging.error(f"No user found with email {user_email}")
+#                 return jsonify({"error": "User not found"}), 404
+
+#             # Assuming one user matches the query
+#             user_doc = user_query[0]
+#             user_id = user_doc.id
+#             payment_ref = users_ref.document(user_id).collection('payment').document('details')
+#             payment_doc = payment_ref.get()
+
+#             if not payment_doc.exists:
+#                 logging.error(f"Payment document not found for user {user_id}")
+#                 return jsonify({"error": "Payment document not found"}), 404
+
+#             payment_data = payment_doc.to_dict()
+
+#             # Determine token or subscription based on amount
+#             tokens_to_add = 0
+#             if amount_received == 350:  # Example: $5 for 50 tokens
+#                 tokens_to_add = 5
+#             elif amount_received == 650:  # Example: $10 for 120 tokens
+#                 tokens_to_add = 10
+#             elif amount_received == 1800:  # Example: $18 for 300 tokens
+#                 tokens_to_add = 30
+#             elif amount_received == 2750:  # Example: $27.50 for 500 tokens
+#                 tokens_to_add = 50
+#             elif amount_received == 5000:  # Example: $50 for 1000 tokens
+#                 tokens_to_add = 100
+#             elif amount_received == 2000:  # Example: $20 for a 1-month subscription
+#                 current_date = datetime.utcnow()
+#                 subscription_duration = timedelta(days=30)
+#                 new_subscription_end_date = (
+#                     max(current_date, payment_data.get('subscription_end_date', current_date))
+#                     + subscription_duration
+#                 )
+#                 payment_ref.update({
+#                     'token_count': 99999,
+#                     'is_subscribed': True,
+#                     'subscription_end_date': new_subscription_end_date
+#                 })
+#                 logging.info(f"Updated subscription for user {user_id} to end on {new_subscription_end_date}")
+#                 return jsonify({"status": "success"}), 200
+#             elif amount_received == 5000:  # Example: $50 for a 3-month subscription
+#                 current_date = datetime.utcnow()
+#                 subscription_duration = timedelta(days=90)
+#                 new_subscription_end_date = (
+#                     max(current_date, payment_data.get('subscription_end_date', current_date))
+#                     + subscription_duration
+#                 )
+#                 payment_ref.update({
+#                     'token_count': 99999,
+#                     'is_subscribed': True,
+#                     'subscription_end_date': new_subscription_end_date
+#                 })
+#                 logging.info(f"Updated subscription for user {user_id} to end on {new_subscription_end_date}")
+#                 return jsonify({"status": "success"}), 200
+
+#             # Update token count if applicable
+#             if tokens_to_add > 0:
+#                 payment_ref.update({'token_count': payment_data['token_count'] + tokens_to_add})
+#                 logging.info(f"Added {tokens_to_add} tokens for user {user_id}")
+
+#         except Exception as e:
+#             logging.error(f"Error updating payment details for user {user_email}: {str(e)}")
+#             return jsonify({"error": str(e)}), 500
+
 #     elif event['type'] == 'payment_intent.payment_failed':
 #         payment_intent = event['data']['object']
 #         logging.warning(f"Payment failed for PaymentIntent: {payment_intent['id']}")
@@ -103,8 +181,9 @@ def stripe_webhook():
     # Handle the event
     if event['type'] == 'payment_intent.succeeded':
         payment_intent = event['data']['object']
+        logging.info("Payment Intent: %s", json.dumps(payment_intent, indent=2))
 
-        # Get user email from the payment intent
+        # Extract user email from payment intent
         user_email = payment_intent.get('receipt_email')
         amount_received = payment_intent.get('amount_received')  # Amount in cents
 
@@ -113,15 +192,12 @@ def stripe_webhook():
             return jsonify({"error": "User email missing"}), 400
 
         try:
-            # Reference to the user's payment document using email
-            user_query = users_ref.where("email", "==", user_email).get()
-            if not user_query:
-                logging.error(f"No user found with email {user_email}")
-                return jsonify({"error": "User not found"}), 404
+            # Retrieve user_id using email
+            user_record = auth.get_user_by_email(user_email)
+            user_id = user_record.uid
+            logging.info(f"Retrieved user_id {user_id} for email {user_email}")
 
-            # Assuming one user matches the query
-            user_doc = user_query[0]
-            user_id = user_doc.id
+            # Reference to the user's payment document
             payment_ref = users_ref.document(user_id).collection('payment').document('details')
             payment_doc = payment_ref.get()
 
@@ -177,6 +253,9 @@ def stripe_webhook():
                 payment_ref.update({'token_count': payment_data['token_count'] + tokens_to_add})
                 logging.info(f"Added {tokens_to_add} tokens for user {user_id}")
 
+        except firebase_admin.exceptions.FirebaseError as e:
+            logging.error(f"Error retrieving user_id for email {user_email}: {str(e)}")
+            return jsonify({"error": str(e)}), 500
         except Exception as e:
             logging.error(f"Error updating payment details for user {user_email}: {str(e)}")
             return jsonify({"error": str(e)}), 500
