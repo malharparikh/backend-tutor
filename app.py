@@ -10,6 +10,7 @@ from prompt_classifier import classify_prompt
 from categories import categories
 import stripe
 from datetime import datetime, timedelta
+import json
 
 load_dotenv()
 
@@ -103,8 +104,7 @@ def stripe_webhook():
     # Handle the event
     if event['type'] == 'payment_intent.succeeded':
         payment_intent = event['data']['object']
-        user_email = payment_intent.get('charges', {}).get('data', [{}])[0].get('billing_details', {}).get('email')
-        logging.info("EMAIL", user_email)
+        logging.info("Payment Intent: %s", json.dumps(payment_intent, indent=2))
         user_id = payment_intent['metadata'].get('user_id')  # User ID from metadata
         amount_received = payment_intent['amount_received']  # Amount in cents
         logging.info("PAY AMOUNT", amount_received)
